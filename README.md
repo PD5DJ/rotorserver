@@ -56,11 +56,9 @@ Currently two rotor protocols are implemented: **Yaesu GS-232A/B** and **Prosist
 
 ## Installation
 
-Copy the package to your Linux system, then run the install script. That's it.
-
 ```bash
-tar xzf n1mm_rotor_server.tar.gz
-cd n1mm_rotor_server
+git clone https://github.com/PD5DJ/rotorserver.git
+cd rotorserver
 sudo bash install.sh
 ```
 
@@ -71,6 +69,7 @@ After installation you never need to touch the Linux system again. All configura
 **Updating to a new version:**
 
 ```bash
+git pull
 sudo bash update.sh
 ```
 
