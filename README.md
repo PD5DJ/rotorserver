@@ -163,12 +163,6 @@ Full documentation and feature overview: **[rotorserver.pd5dj.nl](https://rotors
 
 ---
 
-## Author
-
-PD5DJ — [ai@pd5dj.nl](mailto:ai@pd5dj.nl)
-
----
-
 ## License
 
 See `LICENSE` file.
