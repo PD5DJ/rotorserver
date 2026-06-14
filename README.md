@@ -159,9 +159,3 @@ For each antenna:
 ## More information
 
 Full documentation and feature overview: **[rotorserver.pd5dj.nl](https://rotorserver.pd5dj.nl/)**
-
----
-
-## License
-
-See `LICENSE` file.
