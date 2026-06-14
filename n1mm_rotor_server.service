@@ -1,0 +1,17 @@
+[Unit]
+Description=N1MM Rotor Server
+After=network.target
+Documentation=man:n1mm_rotor_server(1)
+
+[Service]
+Type=simple
+User=n1mm
+Group=dialout
+ExecStart=/usr/local/bin/n1mm_rotor_server --run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

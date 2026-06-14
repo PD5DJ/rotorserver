@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>N1MM Rotor Server</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%23222'/><line x1='16' y1='16' x2='16' y2='4' stroke='%2300aaff' stroke-width='2.5' stroke-linecap='round'/><circle cx='16' cy='16' r='3' fill='%2300aaff'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="not-ready">
+<header>
+  <nav class="tabs">
+    <button class="tab active" data-tab="rotors">Rotors</button>
+    <button class="tab" data-tab="meteo">Meteo</button>
+  </nav>
+  <div class="header-center">
+    <span id="storm-header-badge" style="display:none"></span>
+    <span class="title">N1MM Rotor Server</span>
+    <span id="header-info" class="header-info"></span>
+  </div>
+  <div class="header-right">
+    <button id="btn-log"     class="btn-icon" title="Server log"><svg viewBox="0 0 18 18" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="14" height="12" rx="2"/><polyline points="5,7 7,9 5,11"/><line x1="9" y1="11" x2="13" y2="11"/></svg></button>
+    <button id="btn-theme"   class="btn-icon" title="Toggle theme"><svg viewBox="0 0 18 18" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="9" cy="9" r="3.2"/><line x1="9" y1="1.5" x2="9" y2="3.2"/><line x1="9" y1="14.8" x2="9" y2="16.5"/><line x1="1.5" y1="9" x2="3.2" y2="9"/><line x1="14.8" y1="9" x2="16.5" y2="9"/><line x1="3.4" y1="3.4" x2="4.6" y2="4.6"/><line x1="13.4" y1="13.4" x2="14.6" y2="14.6"/><line x1="14.6" y1="3.4" x2="13.4" y2="4.6"/><line x1="4.6" y1="13.4" x2="3.4" y2="14.6"/></svg></button>
+    <button id="btn-menu"    class="btn-icon" title="Menu"><svg viewBox="0 0 18 18" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 2v6"/><path d="M5.5 4.2A6 6 0 1 0 12.5 4.2"/></svg></button>
+    <button id="btn-settings" class="btn-icon" title="Settings"><svg viewBox="0 0 18 18" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2a3 3 0 0 0-2.1 5.1L3.1 15.4a1 1 0 0 0 1.4 1.4l8.3-8.3A3 3 0 1 0 13.5 2z"/><circle cx="13.5" cy="4.5" r=".8" fill="currentColor" stroke="none"/></svg></button>
+  </div>
+</header>
+
+<!-- ── Rotors tab ─────────────────────────────────────────────────────── -->
+<div id="tab-rotors" class="tab-content active">
+  <div id="rotor-grid" class="card-grid"></div>
+  <div id="no-rotors" class="no-data" style="display:none">
+    No rotor data — is the server running?
+  </div>
+</div>
+
+<!-- ── Meteo tab ──────────────────────────────────────────────────────── -->
+<div id="tab-meteo" class="tab-content">
+  <div id="meteo-grid" class="card-grid"></div>
+  <div id="no-meteo" class="no-data" style="display:none">
+    Wind monitor is not enabled.
+  </div>
+</div>
+
+<!-- ── Login dialog ───────────────────────────────────────────────────── -->
+<div id="dlg-login" class="dlg-overlay" style="display:none">
+  <div class="dlg">
+    <h3>Login</h3>
+    <input id="pw-input" type="password" placeholder="Password" autocomplete="current-password">
+    <div id="pw-error" class="pw-error"></div>
+    <div class="dlg-btns">
+      <button class="btn" id="btn-login-ok">Login</button>
+      <button class="btn btn-cancel" id="btn-login-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── GOTO dialog ────────────────────────────────────────────────────── -->
+<div id="dlg-goto" class="dlg-overlay" style="display:none">
+  <div class="dlg">
+    <h3>Send GOTO — <span id="goto-rotor-name"></span></h3>
+    <div class="goto-row">
+      <label>Azimuth</label>
+      <input id="goto-az" type="number" min="0" max="360" step="1" value="180">
+      <span>°</span>
+    </div>
+    <div class="dlg-btns">
+      <button class="btn" id="btn-goto-ok">Send</button>
+      <button class="btn btn-cancel" id="btn-goto-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

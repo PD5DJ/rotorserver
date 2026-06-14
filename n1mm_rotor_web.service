@@ -1,0 +1,17 @@
+[Unit]
+Description=N1MM Rotor Web Interface
+After=network.target n1mm_rotor_server.service
+Requires=n1mm_rotor_server.service
+
+[Service]
+Type=simple
+User=n1mm
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_BOOT
+ExecStart=/usr/local/bin/n1mm_rotor_web
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
