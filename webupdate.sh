@@ -28,6 +28,7 @@ WEB=n1mm_rotor_web
 install -m 644 "$WWW_SRC/index.html" "$WWW_DST/"
 install -m 644 "$WWW_SRC/style.css"  "$WWW_DST/"
 install -m 644 "$WWW_SRC/app.js"     "$WWW_DST/"
+cp -r "$WWW_SRC/vendor" "$WWW_DST/"
 ok "Copied www/ → $WWW_DST"
 
 # ── Restart web service ───────────────────────────────────────────────────────

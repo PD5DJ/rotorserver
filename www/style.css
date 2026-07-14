@@ -155,6 +155,28 @@ body.light .wmon-card { background: #fff !important; }
 /* Wind rose card */
 .wind-rose-wrap { display: flex; justify-content: center; margin: 6px 0; }
 
+/* ─── Map tab: fills the full viewport below the header, edge to edge ──── */
+#tab-map.tab-content { padding: 0; height: calc(100vh - 52px); }
+#tab-map.tab-content.active { display: flex; }
+#tab-map .map-card { width: 100%; min-width: 0; max-width: 100%; flex: 1 1 100%;
+                      display: flex; flex-direction: column; height: 100%;
+                      padding: 0; border-radius: 0; border: none; }
+#tab-map .card-title { padding: 10px 14px; margin-bottom: 0; flex: 0 0 auto;
+                        border-bottom: 1px solid var(--border); }
+.map-canvas-wrap { width: 100%; flex: 1 1 auto; min-height: 0; position: relative; }
+#map-canvas { width: 100%; height: 100%; display: block; }
+.map-view-toggle { display: flex; gap: 4px; }
+.map-view-btn { background: var(--bg2); border: 1px solid var(--border); color: var(--text2);
+                font-size: 11px; font-weight: 600; text-transform: none; letter-spacing: 0;
+                padding: 3px 10px; border-radius: 4px; cursor: pointer; }
+.map-view-btn.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+#map-satellite-wrap { position: absolute; inset: 0; }
+/* z-index isolates Leaflet's own internal panes (up to z-index 700) into their own
+ * stacking context, so the overlay canvas below reliably paints above all of them. */
+#map-leaflet { position: absolute; inset: 0; z-index: 1; }
+#map-overlay-canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+                       pointer-events: none; z-index: 2; }
+
 /* History graph */
 .graph-wrap { position: relative; width: 100%; }
 .graph-wrap canvas { display: block; width: 100%; }

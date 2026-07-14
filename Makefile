@@ -38,6 +38,7 @@ install-www:
 	install -m 644 www/index.html $(WWW_DIR)/
 	install -m 644 www/style.css  $(WWW_DIR)/
 	install -m 644 www/app.js     $(WWW_DIR)/
+	cp -r www/vendor $(WWW_DIR)/
 	@echo "Web UI files installed to $(WWW_DIR)"
 
 uninstall:

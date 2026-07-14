@@ -43,7 +43,7 @@
 #include <sys/un.h>
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
-#define VERSION              "2.10.3"
+#define VERSION              "2.10.4"
 #define MAX_ROTORS           16
 #define DEFAULT_CONFIG       "/etc/n1mm_rotor_server/n1mm_rotor_server.conf"
 #define LOG_FILE             "/var/log/n1mm_rotor_server.log"
@@ -113,6 +113,8 @@ typedef struct {
     int  always_controllable;  /* 1 = N1MM GOTO always accepted, even during storm */
     int  simulate;             /* 1 = simulate movement, no serial port needed     */
     int  return_timeout_min;   /* 0=off, else minutes idle before return to storm  */
+    double pos_lat, pos_lon;   /* mast GPS position in decimal degrees, for the Map tab */
+    double map_line_len_m;     /* Map tab: direction-line length in meters (0/unset = default) */
 } RotorCfg;
 
 typedef enum { PROTO_YAESU, PROTO_PROSISTEL } Protocol;
@@ -573,10 +575,28 @@ static int rotor_query_az(Rotor *r, double *az)
 
 static void rotor_goto_az(Rotor *r, double az)
 {
-    if (az < 0.0)   az = 0.0;
-    if (az > 360.0) az = 360.0;
+    /* Normalize instead of clamp: the rotor's mechanical stop sits at
+     * 0/360, so a dial target must wrap there, never be clipped to it. */
+    az = fmod(az, 360.0);
+    if (az < 0.0) az += 360.0;
     if (r->protocol == PROTO_PROSISTEL) prosistel_goto_az(r, az);
     else                                yaesu_goto_az(r, az);
+}
+
+/* Normalize an arbitrary degree value into [0, 360) */
+static double norm360(double deg)
+{
+    double v = fmod(deg, 360.0);
+    if (v < 0.0) v += 360.0;
+    return v;
+}
+
+/* Convert an antenna-space bearing to the rotor's dial-space target,
+ * accounting for the mechanical heading offset. Inverse of the
+ * dial->antenna conversion used when reporting position (az - offset). */
+static double antenna_to_dial(double antenna_deg, int rotor_offset)
+{
+    return norm360(antenna_deg + rotor_offset);
 }
 
 static void rotor_stop(Rotor *r)
@@ -656,7 +676,7 @@ static void handle_xml(const char *xml, int len)
         if (!xml_get(buf, "goazi", goazi_s,  sizeof(goazi_s))) return;
         xml_get(buf, "offset", offset_s, sizeof(offset_s));
 
-        double target = atof(goazi_s) + atof(offset_s);
+        double n1mm_az = atof(goazi_s) + atof(offset_s);
         Rotor *r = find_rotor(rname);
         if (!r) { logmsg("GOTO: unknown rotor '%s'", rname); return; }
 
@@ -665,7 +685,7 @@ static void handle_xml(const char *xml, int len)
             return;
         }
 
-        double actual_az = target + r->cfg.offset;
+        double actual_az = antenna_to_dial(n1mm_az, r->cfg.offset);
 
         pthread_mutex_lock(&r->lock);
         r->target_az    = actual_az;
@@ -1119,7 +1139,10 @@ static int config_write(const char *path)
         fprintf(f, "rotor%d_storm_offset=%d\n",        i, c->storm_offset);
         fprintf(f, "rotor%d_always_controllable=%d\n",    i, c->always_controllable);
         fprintf(f, "rotor%d_return_timeout_min=%d\n",    i, c->return_timeout_min);
-        fprintf(f, "rotor%d_simulate=%d\n\n",             i, c->simulate);
+        fprintf(f, "rotor%d_simulate=%d\n",             i, c->simulate);
+        fprintf(f, "rotor%d_pos_lat=%.6f\n",             i, c->pos_lat);
+        fprintf(f, "rotor%d_pos_lon=%.6f\n",             i, c->pos_lon);
+        fprintf(f, "rotor%d_map_line_len_m=%.2f\n\n",    i, c->map_line_len_m);
     }
 
     fclose(f);
@@ -1233,6 +1256,9 @@ static int config_read(const char *path)
                 else if (strcmp(field, "always_controllable")  == 0) c->always_controllable  = atoi(val);
                 else if (strcmp(field, "simulate")             == 0) c->simulate             = atoi(val);
                 else if (strcmp(field, "return_timeout_min")   == 0) c->return_timeout_min   = atoi(val);
+                else if (strcmp(field, "pos_lat")              == 0) c->pos_lat              = atof(val);
+                else if (strcmp(field, "pos_lon")              == 0) c->pos_lon              = atof(val);
+                else if (strcmp(field, "map_line_len_m")       == 0) c->map_line_len_m        = atof(val);
             }
         }
     }
@@ -2633,15 +2659,17 @@ static void storm_apply_goto(void)
         Rotor *r = &g_rotors[i];
         if (!r->cfg.storm_enabled) continue;
 
-        double primary  = fmod(dir + r->cfg.storm_offset + 360.0, 360.0);
-        double fallback = fmod(dir + 180.0 + r->cfg.storm_offset + 360.0, 360.0);
+        double primary_ant  = norm360(dir + r->cfg.storm_offset);
+        double fallback_ant = norm360(dir + 180.0 + r->cfg.storm_offset);
 
         pthread_mutex_lock(&r->lock);
-        double cur_az = r->current_az;
+        double cur_ant = norm360(r->current_az - r->cfg.offset);
         pthread_mutex_unlock(&r->lock);
 
-        double target = (fabs(cur_az - primary) > 180.0) ? fallback : primary;
-        if (target < 0.5) target = 360.0;  /* 0° = no data; N = 360 */
+        double target_ant = (fabs(cur_ant - primary_ant) > 180.0) ? fallback_ant : primary_ant;
+        if (target_ant < 0.5) target_ant = 360.0;  /* 0° = no data; N = 360 */
+
+        double target = antenna_to_dial(target_ant, r->cfg.offset);
 
         pthread_mutex_lock(&r->lock);
         r->storm_active = 1;
@@ -2779,12 +2807,13 @@ static void *storm_thread(void *arg)
                 if ((now - last_goto) < timeout_ms) continue;
                 if (!ret_has || ret_dir < 0.5) continue;
 
-                double primary  = fmod(ret_dir + r->cfg.storm_offset + 360.0, 360.0);
-                double fallback = fmod(ret_dir + 180.0 + r->cfg.storm_offset + 360.0, 360.0);
+                double primary_ant  = norm360(ret_dir + r->cfg.storm_offset);
+                double fallback_ant = norm360(ret_dir + 180.0 + r->cfg.storm_offset);
                 pthread_mutex_lock(&r->lock);
-                double cur_az = r->current_az;
-                double target = (fabs(cur_az - primary) > 180.0) ? fallback : primary;
-                if (target < 0.5) target = 360.0;
+                double cur_ant = norm360(r->current_az - r->cfg.offset);
+                double target_ant = (fabs(cur_ant - primary_ant) > 180.0) ? fallback_ant : primary_ant;
+                if (target_ant < 0.5) target_ant = 360.0;
+                double target = antenna_to_dial(target_ant, r->cfg.offset);
                 r->target_az           = target;
                 r->moving              = 1;
                 r->stall_ref_az        = r->current_az;

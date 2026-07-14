@@ -1,7 +1,7 @@
 # N1MM Rotor Server — Linux
 
 Single-file C project (`n1mm_rotor_server.c`) for controlling antenna rotors from N1MM Logger.
-Built by PD5DJ. Version 2.10.3.
+Built by PD5DJ. Version 2.10.4.
 
 ## Building
 
@@ -52,6 +52,9 @@ rotor0_storm_offset=0             # degrees relative to wind (-180..180)
 rotor0_always_controllable=0      # 1=always accept N1MM GOTO even during storm correction
 rotor0_return_timeout_min=0       # 0=off; 15/30/60/120 = minutes idle before return to storm
 rotor0_simulate=0                 # 1=simulate movement, no serial port needed
+rotor0_pos_lat=0                  # mast GPS latitude (decimal degrees), for the Map tab
+rotor0_pos_lon=0                  # mast GPS longitude (decimal degrees), for the Map tab
+rotor0_map_line_len_m=0           # Map tab direction-line length in meters (0/unset = default 15m)
 
 # Wind monitor
 wind_enabled=1
@@ -173,6 +176,7 @@ The web server reads the complete HTTP request body using a recv loop based on `
 - `index.html` — single-page app shell
 - `style.css` — dark/light theme, responsive layout
 - `app.js` — all UI logic, SSE handling, compass drawing
+- `vendor/leaflet/` — Leaflet 1.9.4 (JS/CSS/images), vendored locally. The **only** external dependency in this project — everything else is vanilla JS/CSS with no build step. Used solely for the Map tab's Satellite view (tile pan/zoom); the library itself works offline, only the map tiles need internet. Not fetched from a CDN so the UI still loads without internet (Satellite view then just shows no tiles; Grid view is unaffected).
 
 ### Key JS concepts
 - All icons are inline SVG constants (`ICO_POWER`, `ICO_TRASH`, `ICO_CHART`, `ICO_TERMINAL`, etc.) — no font/emoji dependencies
@@ -206,6 +210,33 @@ The web server reads the complete HTTP request body using a recv loop based on `
 - Device spinner shows all `/dev/serial/by-path/` ports; already-registered ports show `[naam]` suffix
 - `normDev(s)` — normalises `usbv2` ↔ `usb` path variants for cross-platform matching
 - **Simulate mode**: Device / Protocol / Baud fields hidden when Simulate checkbox is checked; `by_path` cleared on save
+- **Map**: `pos_lat`/`pos_lon` fields (GPS decimal degrees) — mast position, and `map_line_len_m` — direction-line length in meters (blank/0 = default 15m), both used by the Map tab
+
+### Map tab
+- Third tab, alongside Rotors/Meteo — simple site plan showing mast positions and current antenna directions
+- Two view modes, toggled by `.map-view-btn` buttons (`data-view="grid"` / `"satellite"`), persisted in `localStorage` (`map_view`): **Grid** (abstract plattegrond, no internet needed) and **Satellite** (real aerial imagery via Leaflet)
+- `mapView` (global) tracks the active mode; `setMapView(view)` toggles button/element visibility and calls `renderActiveMap()`, which dispatches to `renderMap()` (grid) or `renderMapSatellite()` (satellite)
+- Each rotor gets a fixed color from `MAP_PALETTE` (8-hue categorical set, light/dark variants via `mapColor(idx, dark)`) applied to its dot, rings and direction line — same visual identity in both view modes; grey when the rotor has no data
+- Every mast: two concentric translucent rings (r=20/30px) behind the dot, a direction line showing the current corrected azimuth (no target-azimuth line, unlike the compass), the rotor name above, and the live azimuth in degrees below — text always in plain ink (never the series color) so identity never depends on color alone
+
+**Grid mode** (`renderMap()`, `#map-canvas`)
+- Reads `pos_lat`/`pos_lon`/`map_line_len_m` per rotor from `cfgCache` (`/api/config`), current heading from `state.rotors` (SSE `rotors` event)
+- `projectLatLon()` converts GPS lat/lon to a local flat X/Y plane in meters, centered on the mean position of all configured rotors (equirectangular approximation — accurate enough at antenna-site scale)
+- Auto-scaled/centered to fit all configured mast positions, uniform X/Y scale (no skew), north-up orientation; scale is based only on mast positions, not on `map_line_len_m` — long direction lines can extend past the plotted area by design
+- Background grid with "nice" step size (1/2/5/10× a power of ten) and meter labels on both axes; small N arrow top-right
+- `MAP_DEFAULT_LINE_LEN_M` (15) — fallback used when a rotor has no `map_line_len_m` configured
+
+**Satellite mode** (`renderMapSatellite()`, `#map-leaflet` + `#map-overlay-canvas`)
+- `initLeafletMap()` lazily creates the Leaflet map (once) with an Esri World Imagery tile layer (`server.arcgisonline.com/.../World_Imagery/...`, no API key); `tileerror` shows a one-time toast if tiles can't load (no internet)
+- `maxZoom: 22` / `maxNativeZoom: 19` — lets the user zoom in past Esri's native tile resolution; Leaflet upscales (blurry) rather than stopping at 19
+- On first render with data, `fitBounds()` frames all configured masts once — afterwards the user's own pan/zoom is left alone (no per-tick recentering)
+- Markers/rings/lines are **not** native Leaflet layers — they're drawn on `#map-overlay-canvas`, an absolutely-positioned `pointer-events:none` canvas stacked exactly over the Leaflet container (`z-index` set explicitly on both `#map-leaflet` and `#map-overlay-canvas` — Leaflet's internal panes have their own z-index up to 700, so without this the overlay silently renders underneath them), redrawn via `leafletMap.latLngToContainerPoint()` on every `move`/`zoom` event and every SSE `rotors` update
+- `destPoint(lat, lon, bearingDeg, distM)` — spherical-earth destination-point formula, used to place the direction line's endpoint at the correct real-world distance regardless of zoom/latitude (Mercator-correct, unlike a flat pixel offset)
+- `strokeCasedLine()` / `strokeCasedArc()` — dark-outline "casing" (drawn wider in black first, then the color on top), same technique as roads on a printed map, so lines/rings stay visible over any satellite terrain color; `fillTextHalo()` does the same for text with a stroked outline
+- Labels get a `fillTextHalo()` dark outline — satellite photos have no predictable background color/contrast, unlike the flat card background in Grid mode
+
+- Redraws on tab activation, window resize, and every SSE `rotors` update while the Map tab is active
+- Card hidden (`no-map` message shown instead) when no rotors are configured
 
 ### Meteo tab
 - **Wind Monitor** card: source, direction, force, gust, storm threshold, timer; 📈 button opens wind 48h popup
@@ -235,6 +266,8 @@ RotorCfg {
     int  always_controllable;
     int  simulate;               // 1 = no serial port, movement simulated
     int  return_timeout_min;     // 0=off; minutes idle before auto-return to storm position
+    double pos_lat, pos_lon;     // mast GPS position in decimal degrees, for the Map tab
+    double map_line_len_m;       // Map tab direction-line length in meters (0/unset = default 15m)
 }
 
 Rotor {
@@ -388,6 +421,8 @@ sudo bash webupdate.sh   # copy www/ files only + restart n1mm_rotor_web (no reb
 sudo make install-www    # copy www/ files only (no service restart)
 sudo bash uninstall.sh   # remove everything (asks about config + log)
 ```
+
+All three www-copying paths (`install.sh`, `webupdate.sh`, `make install-www`) also copy `www/vendor/` (Leaflet) recursively — keep them in sync if `www/` gains further subdirectories.
 
 ### Sudoers
 Install.sh creates `/etc/sudoers.d/n1mm_rotor_server` with `!requiretty` and NOPASSWD rules for:

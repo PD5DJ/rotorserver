@@ -54,6 +54,7 @@ install -d -m 755 "$WWW_DIR"
 install -m 644 www/index.html "$WWW_DIR/"
 install -m 644 www/style.css  "$WWW_DIR/"
 install -m 644 www/app.js     "$WWW_DIR/"
+cp -r www/vendor "$WWW_DIR/"
 ok "Web UI files installed to $WWW_DIR"
 
 # Update service files (picks up capability or other changes)

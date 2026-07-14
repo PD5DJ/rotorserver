@@ -37,7 +37,7 @@
 #include <sys/reboot.h>
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
-#define VERSION          "2.10.3"
+#define VERSION          "2.10.4"
 #define DEFAULT_CONFIG   "/etc/n1mm_rotor_server/n1mm_rotor_server.conf"
 #define GUI_SOCK_PATH    "/tmp/n1mm_rotor_server.sock"
 #define WWW_DIR          "/etc/n1mm_rotor_server/www"
@@ -84,6 +84,8 @@ typedef struct {
     int  always_controllable;
     int  simulate;
     int  return_timeout_min;
+    double pos_lat, pos_lon; /* mast GPS position in decimal degrees, for the Map tab */
+    double map_line_len_m; /* Map tab: direction-line length in meters (0/unset = default) */
 } WebRotorCfg;
 
 typedef struct {
@@ -389,6 +391,9 @@ static void cfg_read(const char *path)
                 else if (!strcmp(field,"always_controllable")) r->always_controllable  = atoi(v);
                 else if (!strcmp(field,"simulate"))            r->simulate             = atoi(v);
                 else if (!strcmp(field,"return_timeout_min"))  r->return_timeout_min   = atoi(v);
+                else if (!strcmp(field,"pos_lat"))             r->pos_lat              = atof(v);
+                else if (!strcmp(field,"pos_lon"))             r->pos_lon              = atof(v);
+                else if (!strcmp(field,"map_line_len_m"))      r->map_line_len_m       = atof(v);
             }
         }
     }
@@ -468,7 +473,10 @@ static int cfg_write(void)
         fprintf(f, "rotor%d_storm_offset=%d\n",      i, r->storm_offset);
         fprintf(f, "rotor%d_always_controllable=%d\n",    i, r->always_controllable);
         fprintf(f, "rotor%d_return_timeout_min=%d\n",    i, r->return_timeout_min);
-        fprintf(f, "rotor%d_simulate=%d\n\n",             i, r->simulate);
+        fprintf(f, "rotor%d_simulate=%d\n",             i, r->simulate);
+        fprintf(f, "rotor%d_pos_lat=%.6f\n",             i, r->pos_lat);
+        fprintf(f, "rotor%d_pos_lon=%.6f\n",             i, r->pos_lon);
+        fprintf(f, "rotor%d_map_line_len_m=%.2f\n\n",    i, r->map_line_len_m);
     }
     fclose(f);
     return 0;
@@ -534,10 +542,12 @@ static int config_to_json(char *buf, size_t sz)
         len += snprintf(buf+len, sz-len,
             "{\"name\":\"%s\",\"by_path\":\"%s\",\"protocol\":\"%s\","
             "\"baud\":%d,\"offset\":%d,\"storm_enabled\":%d,"
-            "\"storm_offset\":%d,\"always_controllable\":%d,\"simulate\":%d,\"return_timeout_min\":%d}",
+            "\"storm_offset\":%d,\"always_controllable\":%d,\"simulate\":%d,\"return_timeout_min\":%d,"
+            "\"pos_lat\":%.6f,\"pos_lon\":%.6f,\"map_line_len_m\":%.2f}",
             ename, ebp, eprot,
             r->baud > 0 ? r->baud : 9600, r->offset,
-            r->storm_enabled, r->storm_offset, r->always_controllable, r->simulate, r->return_timeout_min);
+            r->storm_enabled, r->storm_offset, r->always_controllable, r->simulate, r->return_timeout_min,
+            r->pos_lat, r->pos_lon, r->map_line_len_m);
     }
     len += snprintf(buf+len, sz-len, "]}");
     /* Remove last trailing comma before rotors (from the JI/JS macros) */
@@ -632,6 +642,9 @@ static void json_to_config(const char *json, WebConfig *c)
                 d=json_field_d(obj,"always_controllable"); if(!JISNAN(d)) r->always_controllable=(int)d;
                 d=json_field_d(obj,"simulate");            if(!JISNAN(d)) r->simulate=(int)d;
                 d=json_field_d(obj,"return_timeout_min");  if(!JISNAN(d)) r->return_timeout_min=(int)d;
+                d=json_field_d(obj,"pos_lat");              if(!JISNAN(d)) r->pos_lat=d;
+                d=json_field_d(obj,"pos_lon");              if(!JISNAN(d)) r->pos_lon=d;
+                d=json_field_d(obj,"map_line_len_m");       if(!JISNAN(d)) r->map_line_len_m=d;
                 free(obj);
                 ri++;
             }
@@ -1543,6 +1556,9 @@ static void cfg_refresh_from_disk(void)
                 if (!strcmp(field,"storm_offset"))   r->storm_offset    = atoi(v);
                 if (!strcmp(field,"always_controllable")) r->always_controllable = atoi(v);
                 if (!strcmp(field,"return_timeout_min"))  r->return_timeout_min  = atoi(v);
+                if (!strcmp(field,"pos_lat"))              r->pos_lat             = atof(v);
+                if (!strcmp(field,"pos_lon"))               r->pos_lon             = atof(v);
+                if (!strcmp(field,"map_line_len_m"))       r->map_line_len_m      = atof(v);
             }
         }
     }

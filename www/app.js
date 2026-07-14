@@ -319,6 +319,26 @@ function logMakeDraggable(panel, handle) {
 /* ─── Compass size ───────────────────────────────────────────────────── */
 const CW = 180;
 
+/* ─── Map: default direction-line length when a rotor has none configured ── */
+const MAP_DEFAULT_LINE_LEN_M = 15;
+
+/* ─── Map: categorical palette, one hue per rotor (fixed order, not cycled by rank) ── */
+const MAP_PALETTE = [
+  { light: '#2a78d6', dark: '#3987e5' }, /* blue    */
+  { light: '#1baf7a', dark: '#199e70' }, /* aqua    */
+  { light: '#eda100', dark: '#c98500' }, /* yellow  */
+  { light: '#008300', dark: '#008300' }, /* green   */
+  { light: '#4a3aa7', dark: '#9085e9' }, /* violet  */
+  { light: '#e34948', dark: '#e66767' }, /* red     */
+  { light: '#e87ba4', dark: '#d55181' }, /* magenta */
+  { light: '#eb6834', dark: '#d95926' }, /* orange  */
+];
+function mapColor(idx, dark) { return MAP_PALETTE[idx % MAP_PALETTE.length][dark ? 'dark' : 'light']; }
+function hexToRgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+}
+
 /* ─── Tab switching ──────────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -327,7 +347,19 @@ document.querySelectorAll('.tab').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'meteo') renderMeteo();
+    if (btn.dataset.tab === 'map') setMapView(mapView);
   });
+});
+
+function activeTab() {
+  const btn = document.querySelector('.tab.active');
+  return btn ? btn.dataset.tab : null;
+}
+
+window.addEventListener('resize', () => {
+  if (activeTab() !== 'map') return;
+  if (mapView === 'satellite' && leafletMap) leafletMap.invalidateSize();
+  renderActiveMap();
 });
 
 /* ─── Connection status — colours the ⏻ menu button ─────────────────── */
@@ -348,6 +380,7 @@ function connectSSE() {
   es.addEventListener('rotors', e => {
     state.rotors = JSON.parse(e.data);
     renderRotors();
+    if (activeTab() === 'map') renderActiveMap();
     setConnected(true);
   });
   es.addEventListener('wind', e => {
@@ -720,6 +753,346 @@ function azFromClick(e, canvas) {
   let az = Math.atan2(x, -y) * 180 / Math.PI;
   if (az < 0) az += 360;
   return Math.round(az * 10) / 10;
+}
+
+/* ─── Map tab: antenna site plan ──────────────────────────────────────── */
+/* Project GPS lat/lon (decimal degrees) onto a local flat X/Y plane in meters,
+ * centered on the mean position of all rotors. Fine for site-scale distances. */
+const METERS_PER_DEG_LAT = 111320;
+function projectLatLon(rawRotors) {
+  if (!rawRotors.length) return [];
+  const lats = rawRotors.map(r => r.pos_lat || 0);
+  const lons = rawRotors.map(r => r.pos_lon || 0);
+  const lat0 = lats.reduce((a,b) => a+b, 0) / lats.length;
+  const lon0 = lons.reduce((a,b) => a+b, 0) / lons.length;
+  const mPerDegLon = METERS_PER_DEG_LAT * Math.cos(lat0 * Math.PI / 180);
+  return rawRotors.map(r => Object.assign({}, r, {
+    pos_x: ((r.pos_lon || 0) - lon0) * mPerDegLon,
+    pos_y: ((r.pos_lat || 0) - lat0) * METERS_PER_DEG_LAT
+  }));
+}
+
+/* ─── Map tab: Grid / Satellite view toggle ───────────────────────────── */
+let mapView = localStorage.getItem('map_view') || 'grid';
+let leafletMap = null;
+let leafletTileErrorShown = false;
+
+document.querySelectorAll('.map-view-btn').forEach(btn => {
+  btn.addEventListener('click', () => setMapView(btn.dataset.view));
+});
+
+function setMapView(view) {
+  mapView = view;
+  localStorage.setItem('map_view', view);
+  document.querySelectorAll('.map-view-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  const gridCanvas = document.getElementById('map-canvas');
+  const satWrap    = document.getElementById('map-satellite-wrap');
+  if (gridCanvas) gridCanvas.style.display = view === 'grid' ? '' : 'none';
+  if (satWrap)    satWrap.style.display    = view === 'satellite' ? '' : 'none';
+  if (view === 'satellite') {
+    initLeafletMap();
+    if (leafletMap) leafletMap.invalidateSize();
+  }
+  renderActiveMap();
+}
+
+function renderActiveMap() {
+  if (mapView === 'satellite') renderMapSatellite();
+  else renderMap();
+}
+
+function initLeafletMap() {
+  if (leafletMap || typeof L === 'undefined') return;
+  leafletMap = L.map('map-leaflet', { attributionControl: true, maxZoom: 22 });
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 22,
+    maxNativeZoom: 19,   /* Esri's native tile resolution — beyond this Leaflet upscales (blurry, but keeps zooming) */
+    attribution: 'Tiles &copy; Esri &mdash; Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+  }).addTo(leafletMap);
+  leafletMap.setView([0, 0], 2);
+  leafletMap.on('move zoom', renderMapSatellite);
+  leafletMap.on('tileerror', () => {
+    if (!leafletTileErrorShown) {
+      leafletTileErrorShown = true;
+      showToast('Satellite tiles failed to load — check internet connection', true);
+    }
+  });
+}
+
+/* Destination point given a start lat/lon, bearing (deg) and distance (m) — spherical earth,
+ * used to draw a direction line of the correct real-world length regardless of map zoom. */
+const EARTH_RADIUS_M = 6371000;
+function destPoint(lat, lon, bearingDeg, distM) {
+  const delta = distM / EARTH_RADIUS_M;
+  const theta = bearingDeg * Math.PI / 180;
+  const phi1 = lat * Math.PI / 180, lambda1 = lon * Math.PI / 180;
+  const phi2 = Math.asin(Math.sin(phi1)*Math.cos(delta) + Math.cos(phi1)*Math.sin(delta)*Math.cos(theta));
+  const lambda2 = lambda1 + Math.atan2(
+    Math.sin(theta)*Math.sin(delta)*Math.cos(phi1),
+    Math.cos(delta) - Math.sin(phi1)*Math.sin(phi2)
+  );
+  return { lat: phi2 * 180 / Math.PI, lon: lambda2 * 180 / Math.PI };
+}
+
+/* Text with a dark halo outline so labels stay legible over any photographic background */
+function fillTextHalo(ctx, text, x, y) {
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(0,0,0,.85)';
+  ctx.strokeText(text, x, y);
+  ctx.fillText(text, x, y);
+}
+
+/* Line "cased" in a dark outline first, like a road on a printed map — reads over any
+ * satellite background instead of blending into similarly-colored terrain. */
+function strokeCasedLine(ctx, x1, y1, x2, y2, color, width) {
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,.85)';
+  ctx.lineWidth = width + 2.5;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+
+/* Ring cased the same way — a dark pass behind the translucent colored ring */
+function strokeCasedArc(ctx, x, y, r, color, alpha, width) {
+  ctx.strokeStyle = `rgba(0,0,0,${alpha * 0.9})`;
+  ctx.lineWidth = width + 1.5;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = hexToRgba(color, alpha);
+  ctx.lineWidth = width;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.stroke();
+}
+
+function renderMapSatellite() {
+  const wrap    = document.getElementById('map-satellite-wrap');
+  const canvas  = document.getElementById('map-overlay-canvas');
+  const noMap   = document.getElementById('no-map');
+  const mapCard = wrap ? wrap.closest('.map-card') : null;
+  if (!wrap || !canvas || !mapCard) return;
+
+  const rotors = (cfgCache && cfgCache.rotors) || [];
+  if (!rotors.length) {
+    mapCard.style.display = 'none';
+    if (noMap) noMap.style.display = '';
+    return;
+  }
+  mapCard.style.display = '';
+  if (noMap) noMap.style.display = 'none';
+
+  initLeafletMap();
+  if (!leafletMap) return;
+
+  /* Fit bounds once on first data — don't fight the user's own pan/zoom afterwards */
+  if (!leafletMap._n1mmFitted) {
+    const bounds = L.latLngBounds(rotors.map(r => [r.pos_lat || 0, r.pos_lon || 0]));
+    leafletMap.fitBounds(bounds.pad(0.5), { maxZoom: 18 });
+    leafletMap._n1mmFitted = true;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const cw = Math.round(canvas.clientWidth  * dpr) || 600;
+  const ch = Math.round(canvas.clientHeight * dpr) || 400;
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const lw = canvas.clientWidth  || (cw / dpr);
+  const lh = canvas.clientHeight || (ch / dpr);
+  ctx.clearRect(0, 0, lw, lh);
+
+  const dark = !isLight();
+
+  /* Two passes: all rings/lines/dots first, then ALL labels on top — so one rotor's
+   * line can never paint over another rotor's text, regardless of draw order. */
+  const labelJobs = [];
+  rotors.forEach((cr, idx) => {
+    const ll   = [cr.pos_lat || 0, cr.pos_lon || 0];
+    const pt   = leafletMap.latLngToContainerPoint(ll);
+    const live = state.rotors.find(sr => sr.name === cr.name);
+    const hasData = !!(live && live.has_data);
+    const color = hasData ? mapColor(idx, dark) : (dark ? '#666666' : '#aaaaaa');
+
+    /* Rings around the dot, cased in a dark outline for contrast on any terrain */
+    [30, 20].forEach((rr, i) => {
+      strokeCasedArc(ctx, pt.x, pt.y, rr, color, 0.35 + i*0.30, 1.5);
+    });
+
+    if (hasData) {
+      const lineLenM = cr.map_line_len_m || MAP_DEFAULT_LINE_LEN_M;
+      const dest = destPoint(ll[0], ll[1], live.az, lineLenM);
+      const pt2  = leafletMap.latLngToContainerPoint([dest.lat, dest.lon]);
+      strokeCasedLine(ctx, pt.x, pt.y, pt2.x, pt2.y, color, 2.5);
+    }
+
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, 5, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.3; ctx.stroke();
+
+    labelJobs.push({ pt, name: cr.name, hasData, az: live && live.az });
+  });
+
+  /* Labels get a dark halo — satellite imagery has no predictable background color */
+  labelJobs.forEach(job => {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    fillTextHalo(ctx, job.name, job.pt.x, job.pt.y - 14);
+
+    if (job.hasData) {
+      ctx.font = 'bold 15px sans-serif';
+      ctx.textBaseline = 'top';
+      fillTextHalo(ctx, Math.round(job.az) + '°', job.pt.x, job.pt.y + 14);
+    }
+  });
+}
+
+function renderMap() {
+  const canvas  = document.getElementById('map-canvas');
+  const noMap   = document.getElementById('no-map');
+  const mapCard = canvas ? canvas.closest('.map-card') : null;
+  if (!canvas || !mapCard) return;
+
+  const rotors = projectLatLon((cfgCache && cfgCache.rotors) || []);
+  if (!rotors.length) {
+    mapCard.style.display = 'none';
+    if (noMap) noMap.style.display = '';
+    return;
+  }
+  mapCard.style.display = '';
+  if (noMap) noMap.style.display = 'none';
+
+  /* Sync canvas resolution to CSS display size */
+  const dpr = window.devicePixelRatio || 1;
+  const cw = Math.round(canvas.clientWidth  * dpr) || 600;
+  const ch = Math.round(canvas.clientHeight * dpr) || 400;
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width  = cw;
+    canvas.height = ch;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const lw = canvas.clientWidth  || (cw / dpr);
+  const lh = canvas.clientHeight || (ch / dpr);
+  ctx.clearRect(0, 0, lw, lh);
+
+  const dark = !isLight();
+
+  /* World bounding box in meters, with padding so masts aren't on the edge */
+  const xs = rotors.map(r => r.pos_x || 0);
+  const ys = rotors.map(r => r.pos_y || 0);
+  let minX = Math.min(...xs), maxX = Math.max(...xs);
+  let minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = Math.max(maxX - minX, maxY - minY, 10) * 0.3 + 5;
+  minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+  const spanX = maxX - minX, spanY = maxY - minY;
+
+  /* Margins for axis labels */
+  const margin = 30;
+  const pw = lw - margin*2, ph = lh - margin*2;
+
+  /* Uniform scale (meters -> px), same on both axes so directions aren't skewed */
+  const scale = Math.min(pw / spanX, ph / spanY);
+  const usedW = spanX * scale, usedH = spanY * scale;
+  const offX  = margin + (pw - usedW) / 2;
+  const offY  = margin + (ph - usedH) / 2;
+
+  /* World (x=east, y=north, meters) -> screen px, north up */
+  const toPx = (wx, wy) => ({
+    x: offX + (wx - minX) * scale,
+    y: offY + (maxY - wy) * scale
+  });
+
+  /* ── Grid ── */
+  const niceStep = span => {
+    const raw = span / 6;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    return (norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10) * mag;
+  };
+  const step = niceStep(Math.max(spanX, spanY));
+
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,.10)' : 'rgba(0,0,0,.08)';
+  ctx.lineWidth = 1;
+  ctx.font = '9px sans-serif';
+  ctx.fillStyle = dark ? 'rgba(255,255,255,.35)' : 'rgba(0,0,0,.4)';
+
+  for (let gx = Math.ceil(minX/step)*step; gx <= maxX; gx += step) {
+    const p0 = toPx(gx, minY), p1 = toPx(gx, maxY);
+    ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(Math.round(gx) + 'm', p0.x, offY + usedH + 4);
+  }
+  for (let gy = Math.ceil(minY/step)*step; gy <= maxY; gy += step) {
+    const p0 = toPx(minX, gy), p1 = toPx(maxX, gy);
+    ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.round(gy) + 'm', offX - 4, p0.y);
+  }
+
+  /* Border */
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,.2)' : 'rgba(0,0,0,.18)';
+  ctx.strokeRect(offX, offY, usedW, usedH);
+
+  /* North arrow */
+  const naX = offX + usedW - 16, naY = offY + 18;
+  ctx.strokeStyle = '#e05050'; ctx.fillStyle = '#e05050'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(naX, naY+14); ctx.lineTo(naX, naY-6); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(naX, naY-10); ctx.lineTo(naX-4, naY-2); ctx.lineTo(naX+4, naY-2);
+  ctx.closePath(); ctx.fill();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.font = 'bold 10px sans-serif';
+  ctx.fillText('N', naX, naY-10);
+
+  /* ── Rotor markers + current-direction lines, one color per rotor ──
+   * Two passes: all rings/lines/dots first, then ALL labels on top — so one rotor's
+   * line can never paint over another rotor's text, regardless of draw order. */
+  const labelJobs = [];
+  rotors.forEach((cr, idx) => {
+    const p = toPx(cr.pos_x || 0, cr.pos_y || 0);
+    const live = state.rotors.find(sr => sr.name === cr.name);
+    const hasData = !!(live && live.has_data);
+    const lineLen = (cr.map_line_len_m || MAP_DEFAULT_LINE_LEN_M) * scale;   /* meters -> px, per rotor */
+    const color = hasData ? mapColor(idx, dark) : (dark ? '#666666' : '#aaaaaa');
+
+    /* Rings around the dot */
+    ctx.lineWidth = 2.2;
+    [30, 20].forEach((rr, i) => {
+      ctx.strokeStyle = hexToRgba(color, 0.40 + i*0.35);
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, Math.PI*2); ctx.stroke();
+    });
+
+    if (hasData) {
+      const rad = (live.az - 90) * Math.PI / 180;
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x + lineLen*Math.cos(rad), p.y + lineLen*Math.sin(rad));
+      ctx.stroke();
+    }
+
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = dark ? '#2a2a2a' : '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+
+    labelJobs.push({ p, name: cr.name, hasData, az: live && live.az });
+  });
+
+  labelJobs.forEach(job => {
+    ctx.fillStyle = dark ? '#fff' : '#111';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(job.name, job.p.x, job.p.y - 14);
+
+    if (job.hasData) {
+      ctx.font = 'bold 15px sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(Math.round(job.az) + '°', job.p.x, job.p.y + 14);
+    }
+  });
 }
 
 const clickTimers = {};   /* rotor name → setTimeout id */
@@ -1940,7 +2313,7 @@ async function showRotorEditDialog(rotor, idx, cfg, onSave) {
   const devs = await loadDevices();
   const r = rotor || { name:'', by_path:'', protocol:'YAESU', baud:9600, offset:0,
                        storm_enabled:0, storm_offset:0, always_controllable:0, simulate:0,
-                       return_timeout_min:0 };
+                       return_timeout_min:0, pos_lat:0, pos_lon:0, map_line_len_m:0 };
 
   /* Build device options; mark devices already used by another rotor with [name] */
   let devList = [...devs];
@@ -2027,6 +2400,22 @@ async function showRotorEditDialog(rotor, idx, cfg, onSave) {
           </div>
         </div>
         <div class="re-hint">Return to storm position after this idle time (requires Always controllable + active storm)</div>
+        <div class="re-section">Map</div>
+        <div class="re-row">
+          <div class="re-field">
+            <label>Latitude (°)</label>
+            <input id="re-pos-lat" type="number" step="0.000001" value="${r.pos_lat||0}">
+          </div>
+          <div class="re-field">
+            <label>Longitude (°)</label>
+            <input id="re-pos-lon" type="number" step="0.000001" value="${r.pos_lon||0}">
+          </div>
+          <div class="re-field">
+            <label>Line length (m)</label>
+            <input id="re-line-len" type="number" min="1" step="1" value="${r.map_line_len_m || 15}">
+          </div>
+        </div>
+        <div class="re-hint">Mast GPS position (decimal degrees), and the length of the direction line — all shown on the Map tab</div>
       </div>
       <div class="dlg-btns" style="margin-top:16px">
         <button class="btn" id="re-save">${idx<0?'Add':'Save'}</button>
@@ -2058,6 +2447,9 @@ async function showRotorEditDialog(rotor, idx, cfg, onSave) {
       storm_offset:       parseInt(overlay.querySelector('#re-storm-off').value)||0,
       always_controllable: overlay.querySelector('#re-always').checked ? 1 : 0,
       return_timeout_min:  parseInt(overlay.querySelector('#re-return-timeout').value) || 0,
+      pos_lat:            parseFloat(overlay.querySelector('#re-pos-lat').value) || 0,
+      pos_lon:            parseFloat(overlay.querySelector('#re-pos-lon').value) || 0,
+      map_line_len_m:     parseFloat(overlay.querySelector('#re-line-len').value) || 15,
       serial:             r.serial || ''
     };
     if (!updated.name) { alert('Name is required.'); return; }
