@@ -43,7 +43,7 @@
 #include <sys/un.h>
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
-#define VERSION              "2.10.4"
+#define VERSION              "2.11.0"
 #define MAX_ROTORS           16
 #define DEFAULT_CONFIG       "/etc/n1mm_rotor_server/n1mm_rotor_server.conf"
 #define LOG_FILE             "/var/log/n1mm_rotor_server.log"
@@ -916,6 +916,11 @@ static void *poll_bcast_thread(void *arg)
     while (g_running) {
         long long t = now_ms();
 
+        /* Storm flag appended to every broadcast line: S0=off, S1=monitoring,
+         * S2=correction active. N1MM and older clients stop parsing after the
+         * azimuth digits, so the suffix is safely ignored by them. */
+        int storm_flag = g_storm_correcting ? 2 : (g_storm_active ? 1 : 0);
+
         for (int i = 0; i < g_num_rotors; i++) {
             Rotor *r = &g_rotors[i];
 
@@ -967,10 +972,11 @@ static void *poll_bcast_thread(void *arg)
                 char sim_msg[256];
                 double sim_rep_az  = fmod(sim_az     - r->cfg.offset + 360.0, 360.0);
                 double sim_rep_tgt = fmod(sim_target  - r->cfg.offset + 360.0, 360.0);
-                snprintf(sim_msg, sizeof(sim_msg), "%.63s @ %d / %d",
+                snprintf(sim_msg, sizeof(sim_msg), "%.63s @ %d / %d / S%d",
                          r->cfg.name,
                          (int)(sim_rep_az  * 10 + 0.5),
-                         (int)(sim_rep_tgt * 10 + 0.5));
+                         (int)(sim_rep_tgt * 10 + 0.5),
+                         storm_flag);
                 for (int d = 0; d < ndsts;  d++)
                     sendto(sock, sim_msg, strlen(sim_msg), 0,
                            (struct sockaddr *)&dsts[d],  sizeof(dsts[d]));
@@ -1041,12 +1047,14 @@ static void *poll_bcast_thread(void *arg)
             char msg[256];
             double reported_az     = fmod(az              - r->cfg.offset + 360.0, 360.0);
             double reported_target = fmod(target_az_snap  - r->cfg.offset + 360.0, 360.0);
-            /* Format: "NAME @ CURRENT / TARGET"
-             * N1MM reads the integer after '@' and stops at the space — backward compatible. */
-            snprintf(msg, sizeof(msg), "%.63s @ %d / %d",
+            /* Format: "NAME @ CURRENT / TARGET / S<storm>"
+             * N1MM reads the integer after '@' and stops at the space — backward compatible.
+             * S0=storm off, S1=monitoring, S2=correction active (clients show a warning). */
+            snprintf(msg, sizeof(msg), "%.63s @ %d / %d / S%d",
                      r->cfg.name,
                      (int)(reported_az     * 10 + 0.5),
-                     (int)(reported_target * 10 + 0.5));
+                     (int)(reported_target * 10 + 0.5),
+                     storm_flag);
 
             for (int d = 0; d < ndsts; d++)
                 sendto(sock, msg, strlen(msg), 0,

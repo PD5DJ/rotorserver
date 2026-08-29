@@ -22,7 +22,6 @@ Everything is configured and monitored through a **web interface** that runs on 
 - **N1MM Logger+ integration** — drop-in replacement for the N1MM Rotor Client, same UDP protocol
 - **Fully web-based** — add rotors, adjust settings, monitor live headings and weather, all from any browser
 - **Storm protection** — automatically parks antennas when wind exceeds your Beaufort threshold, releases when it calms
-- **Antenna map** — live site plan of all antennas with real-time direction lines, on a schematic grid or on satellite imagery of your QTH
 - **Wind monitoring** from multiple sources: Open-Meteo, yr.no, OpenWeatherMap, WeatherAPI, Ecowitt weather station, serial sensor, or UDP
 - **48-hour wind and meteo history** with interactive graphs
 - **Live log viewer** with filters (ROTOR · WIND · STORM · API · CONN · ERR)
@@ -43,10 +42,6 @@ Currently two rotor protocols are implemented: **Yaesu GS-232A/B** and **Prosist
 | Wind history | Log viewer |
 |---|---|
 | ![Wind history](https://rotorserver.pd5dj.nl/images/meteo-history.png) | ![Log viewer](https://rotorserver.pd5dj.nl/images/log.png) |
-
-| Antenna map — grid view | Antenna map — satellite view |
-|---|---|
-| ![Antenna map grid view](https://rotorserver.pd5dj.nl/images/gridview.png) | ![Antenna map satellite view](https://rotorserver.pd5dj.nl/images/mapview.png) |
 
 ---
 
@@ -108,15 +103,12 @@ Live compass card per rotor. Click to send a GOTO, double-click for instant move
 ### Meteo tab
 Live wind and weather data. Wind rose, Beaufort force, gust, temperature, humidity, pressure, UV, solar radiation. Click any card for a 48-hour history graph.
 
-### Map tab
-Live site plan of your antennas. Each rotor is drawn at its GPS position with a colored direction line that follows the rotor in real time. Two views: **Grid** (schematic meter grid with north arrow, works offline) and **Satellite** (Esri World Imagery of your actual QTH, requires internet). Position and direction-line length are set per rotor in the rotor settings.
-
 ### Settings
 Click the wrench icon (top-right). Five tabs:
 
 | Tab | What you configure |
 |-----|-------------------|
-| **Rotors** | Add, edit, remove rotor controllers; map position per rotor |
+| **Rotors** | Add, edit, remove rotor controllers |
 | **Server** | Network ports, broadcast address, poll intervals |
 | **Meteo** | Wind data source, Ecowitt settings, location |
 | **Storm** | Beaufort threshold, sustain timers, correction interval |

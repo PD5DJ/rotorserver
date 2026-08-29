@@ -759,6 +759,7 @@ function azFromClick(e, canvas) {
 /* Project GPS lat/lon (decimal degrees) onto a local flat X/Y plane in meters,
  * centered on the mean position of all rotors. Fine for site-scale distances. */
 const METERS_PER_DEG_LAT = 111320;
+let mapProj = null;   /* projection params of the last projectLatLon() call */
 function projectLatLon(rawRotors) {
   if (!rawRotors.length) return [];
   const lats = rawRotors.map(r => r.pos_lat || 0);
@@ -766,10 +767,18 @@ function projectLatLon(rawRotors) {
   const lat0 = lats.reduce((a,b) => a+b, 0) / lats.length;
   const lon0 = lons.reduce((a,b) => a+b, 0) / lons.length;
   const mPerDegLon = METERS_PER_DEG_LAT * Math.cos(lat0 * Math.PI / 180);
+  mapProj = { lat0, lon0, mPerDegLon };
   return rawRotors.map(r => Object.assign({}, r, {
     pos_x: ((r.pos_lon || 0) - lon0) * mPerDegLon,
     pos_y: ((r.pos_lat || 0) - lat0) * METERS_PER_DEG_LAT
   }));
+}
+
+/* Project an arbitrary lat/lon through the same local plane as projectLatLon() —
+ * used for intermediate points of great-circle direction lines in Grid view. */
+function projPoint(lat, lon) {
+  return { x: (lon - mapProj.lon0) * mapProj.mPerDegLon,
+           y: (lat - mapProj.lat0) * METERS_PER_DEG_LAT };
 }
 
 /* ─── Map tab: Grid / Satellite view toggle ───────────────────────────── */
@@ -797,8 +806,23 @@ function setMapView(view) {
 }
 
 function renderActiveMap() {
+  renderMapLegend();
   if (mapView === 'satellite') renderMapSatellite();
   else renderMap();
+}
+
+/* ─── Map tab: legend in the title bar — rotor name + its line color ──── */
+function renderMapLegend() {
+  const el = document.getElementById('map-legend');
+  if (!el) return;
+  const rotors = (cfgCache && cfgCache.rotors) || [];
+  const dark = !isLight();
+  el.innerHTML = rotors.map((cr, idx) => {
+    const live = state.rotors.find(sr => sr.name === cr.name);
+    const hasData = !!(live && live.has_data);
+    const color = hasData ? mapColor(idx, dark) : (dark ? '#666666' : '#aaaaaa');
+    return `<span class="map-legend-item"><span class="map-legend-swatch" style="background:${color}"></span>${escHtml(cr.name)}</span>`;
+  }).join('');
 }
 
 function initLeafletMap() {
@@ -843,16 +867,31 @@ function fillTextHalo(ctx, text, x, y) {
   ctx.fillText(text, x, y);
 }
 
-/* Line "cased" in a dark outline first, like a road on a printed map — reads over any
+/* Polyline "cased" in a dark outline first, like a road on a printed map — reads over any
  * satellite background instead of blending into similarly-colored terrain. */
-function strokeCasedLine(ctx, x1, y1, x2, y2, color, width) {
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(0,0,0,.85)';
-  ctx.lineWidth = width + 2.5;
-  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+function strokeCasedPolyline(ctx, pts, color, width) {
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  [['rgba(0,0,0,.85)', width + 2.5], [color, width]].forEach(([c, w]) => {
+    ctx.strokeStyle = c; ctx.lineWidth = w;
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.stroke();
+  });
+}
+
+/* Great-circle segment count for a direction line: ~1 vertex per 2 km so long lines
+ * follow the earth's curvature on the map; short site-scale lines stay a single segment. */
+function greatCircleSegs(distM) {
+  return Math.min(128, Math.max(1, Math.ceil(distM / 2000)));
+}
+
+/* Keep successive great-circle sample longitudes continuous across the ±180° antimeridian.
+ * destPoint() returns principal-value longitudes; without unwrapping, a line crossing the
+ * date line jumps 360° and draws a spurious horizontal streak across the whole map. */
+function unwrapLon(lon, prevLon) {
+  while (lon - prevLon >  180) lon -= 360;
+  while (lon - prevLon < -180) lon += 360;
+  return lon;
 }
 
 /* Ring cased the same way — a dark pass behind the translucent colored ring */
@@ -920,9 +959,26 @@ function renderMapSatellite() {
 
     if (hasData) {
       const lineLenM = cr.map_line_len_m || MAP_DEFAULT_LINE_LEN_M;
-      const dest = destPoint(ll[0], ll[1], live.az, lineLenM);
-      const pt2  = leafletMap.latLngToContainerPoint([dest.lat, dest.lon]);
-      strokeCasedLine(ctx, pt.x, pt.y, pt2.x, pt2.y, color, 2.5);
+      const segs = greatCircleSegs(lineLenM);
+      const pts = [pt];
+      let prevLon = ll[1];
+      let minX = pt.x, maxX = pt.x;
+      for (let k = 1; k <= segs; k++) {
+        const d = destPoint(ll[0], ll[1], live.az, lineLenM * k / segs);
+        prevLon = unwrapLon(d.lon, prevLon);
+        const q = leafletMap.latLngToContainerPoint([d.lat, prevLon]);
+        pts.push(q);
+        if (q.x < minX) minX = q.x;
+        if (q.x > maxX) maxX = q.x;
+      }
+      /* An unwrapped line runs into the adjacent repeated world copy — draw it at every
+       * world offset that intersects the canvas so it re-enters on the visible side too. */
+      const worldW = leafletMap.getPixelWorldBounds().getSize().x;
+      const nFrom = Math.ceil((-maxX) / worldW), nTo = Math.floor((lw - minX) / worldW);
+      for (let n = nFrom; n <= nTo; n++) {
+        const shifted = n === 0 ? pts : pts.map(q => ({ x: q.x + n * worldW, y: q.y }));
+        strokeCasedPolyline(ctx, shifted, color, 2.5);
+      }
     }
 
     ctx.beginPath(); ctx.arc(pt.x, pt.y, 5, 0, Math.PI*2);
@@ -1054,7 +1110,6 @@ function renderMap() {
     const p = toPx(cr.pos_x || 0, cr.pos_y || 0);
     const live = state.rotors.find(sr => sr.name === cr.name);
     const hasData = !!(live && live.has_data);
-    const lineLen = (cr.map_line_len_m || MAP_DEFAULT_LINE_LEN_M) * scale;   /* meters -> px, per rotor */
     const color = hasData ? mapColor(idx, dark) : (dark ? '#666666' : '#aaaaaa');
 
     /* Rings around the dot */
@@ -1065,11 +1120,19 @@ function renderMap() {
     });
 
     if (hasData) {
-      const rad = (live.az - 90) * Math.PI / 180;
-      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      const lineLenM = cr.map_line_len_m || MAP_DEFAULT_LINE_LEN_M;
+      const segs = greatCircleSegs(lineLenM);
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
-      ctx.lineTo(p.x + lineLen*Math.cos(rad), p.y + lineLen*Math.sin(rad));
+      let prevLon = cr.pos_lon || 0;
+      for (let k = 1; k <= segs; k++) {
+        const d = destPoint(cr.pos_lat || 0, cr.pos_lon || 0, live.az, lineLenM * k / segs);
+        prevLon = unwrapLon(d.lon, prevLon);
+        const m = projPoint(d.lat, prevLon);
+        const q = toPx(m.x, m.y);
+        ctx.lineTo(q.x, q.y);
+      }
       ctx.stroke();
     }
 
@@ -2411,11 +2474,11 @@ async function showRotorEditDialog(rotor, idx, cfg, onSave) {
             <input id="re-pos-lon" type="number" step="0.000001" value="${r.pos_lon||0}">
           </div>
           <div class="re-field">
-            <label>Line length (m)</label>
-            <input id="re-line-len" type="number" min="1" step="1" value="${r.map_line_len_m || 15}">
+            <label>Line length (km)</label>
+            <input id="re-line-len" type="number" min="0.001" step="0.001" value="${(r.map_line_len_m || 15)/1000}">
           </div>
         </div>
-        <div class="re-hint">Mast GPS position (decimal degrees), and the length of the direction line — all shown on the Map tab</div>
+        <div class="re-hint">Mast GPS position (decimal degrees), and the length of the direction line in km — all shown on the Map tab</div>
       </div>
       <div class="dlg-btns" style="margin-top:16px">
         <button class="btn" id="re-save">${idx<0?'Add':'Save'}</button>
@@ -2449,7 +2512,7 @@ async function showRotorEditDialog(rotor, idx, cfg, onSave) {
       return_timeout_min:  parseInt(overlay.querySelector('#re-return-timeout').value) || 0,
       pos_lat:            parseFloat(overlay.querySelector('#re-pos-lat').value) || 0,
       pos_lon:            parseFloat(overlay.querySelector('#re-pos-lon').value) || 0,
-      map_line_len_m:     parseFloat(overlay.querySelector('#re-line-len').value) || 15,
+      map_line_len_m:     (parseFloat(overlay.querySelector('#re-line-len').value) * 1000) || 15,
       serial:             r.serial || ''
     };
     if (!updated.name) { alert('Name is required.'); return; }
@@ -2811,6 +2874,7 @@ document.getElementById('btn-theme').addEventListener('click', () => {
   /* Redraw canvases with new theme colours */
   renderRotors();
   renderWindRose();
+  if (activeTab() === 'map') renderActiveMap();
 });
 
 /* ─── Combined menu (⏻ button) ───────────────────────────────────────── */
@@ -2920,6 +2984,23 @@ async function heartbeat() {
 }
 
 setInterval(heartbeat, 10 * 60 * 1000); /* every 10 minutes */
+
+/* ─── Deep links ─────────────────────────────────────────────────────── */
+/* ?tab=rotors|meteo|map opens that tab directly; ?view=grid|satellite picks
+ * the map view (and implies tab=map). Example: /?tab=map&view=satellite */
+(function () {
+  const q    = new URLSearchParams(location.search);
+  const view = q.get('view');
+  let   tab  = q.get('tab');
+  if (view === 'grid' || view === 'satellite') {
+    mapView = view;
+    if (!tab) tab = 'map';
+  }
+  if (tab) {
+    const btn = document.querySelector(`.tab[data-tab="${tab}"]`);
+    if (btn) btn.click();
+  }
+})();
 
 /* ─── Boot ───────────────────────────────────────────────────────────── */
 async function boot() {

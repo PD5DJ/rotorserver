@@ -37,7 +37,7 @@
 #include <sys/reboot.h>
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
-#define VERSION          "2.10.4"
+#define VERSION          "2.11.0"
 #define DEFAULT_CONFIG   "/etc/n1mm_rotor_server/n1mm_rotor_server.conf"
 #define GUI_SOCK_PATH    "/tmp/n1mm_rotor_server.sock"
 #define WWW_DIR          "/etc/n1mm_rotor_server/www"
@@ -1904,8 +1904,10 @@ static void *http_conn_thread(void *arg)
     }
 
     if (!strcmp(path,"/") || !strcmp(path,"")) {
-        /* Redirect to index.html */
-        dprintf(fd,"HTTP/1.1 302 Found\r\nLocation: /index.html\r\nContent-Length: 0\r\n\r\n");
+        /* Redirect to index.html, keeping any query string (deep links like ?tab=map&view=satellite).
+         * qs still points at the stripped '?' inside path; no CRLF risk — sscanf %s stops at whitespace. */
+        if (qs) *qs = '?';
+        dprintf(fd,"HTTP/1.1 302 Found\r\nLocation: /index.html%s\r\nContent-Length: 0\r\n\r\n", qs ? qs : "");
     } else if (!strcmp(path,"/api/events") && !strcmp(method,"GET")) {
         SseArg *sa = malloc(sizeof(SseArg)); sa->fd = fd;
         pthread_t t; pthread_attr_t attr;
